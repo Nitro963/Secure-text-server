@@ -12,10 +12,7 @@ class Socket:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self.writer = writer
         self.reader = reader
-        self.sid = self.get_address()
-
-    def get_address(self):
-        return self.writer.get_extra_info('peername')
+        self.sid = self.writer.get_extra_info('peername')
 
     async def send(self, data: bytes):
         self.writer.write(data)
@@ -37,7 +34,6 @@ class Server:
         @self.event
         async def disconnect(sid):
             logging.info(f'{sid} left {self.name} server.')
-            del self.clients[sid]
 
         @self.event
         async def pong(sid):
@@ -95,13 +91,20 @@ class Server:
 
         while True:
 
-            data_len = int.from_bytes(await reader.read(8), 'big')
+            data = await reader.read(8)
 
-            if not data_len:
+            if not data:
                 asyncio.ensure_future(self.events['disconnect'](sio.sid, 0))
+                del self.clients[sio.sid]
                 break
 
+            # decrypt data
+
+            data_len = int.from_bytes(data, 'big')
+
             data = await self._read_bytes(reader, data_len)
+
+            # decrypt data
 
             data = json.loads(data)
 
