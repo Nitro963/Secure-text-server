@@ -2,10 +2,10 @@ import asyncio
 import logging
 import functools
 import json
+from io import BufferedWriter
+from typing import Dict, Tuple, Callable, Coroutine
 
 CHUNK = 1024
-
-BUFFER_SIZE = 256 * 1024 * 1024
 
 
 class Socket:
@@ -21,26 +21,26 @@ class Socket:
 
 
 class Server:
-    def __init__(self, name, address):
+    def __init__(self, name: str, address: Tuple[str, int]):
         self.name = name
         self.address = address
-        self.clients = {}
-        self.events = {}
+        self.clients: Dict[Tuple[str, int], Socket] = {}
+        self.events: Dict[name, Callable[[Tuple[str, int], int], Coroutine]] = {}
 
         @self.event
-        async def connect(sid):
+        async def connect(sid: Tuple[str, int]):
             logging.info(f'{sid} jumped into {self.name} server.')
 
         @self.event
-        async def disconnect(sid):
+        async def disconnect(sid: Tuple[str, int]):
             logging.info(f'{sid} left {self.name} server.')
 
         @self.event
-        async def pong(sid):
+        async def pong(sid: Tuple[str, int]):
             logging.info(f'Pong! from {sid}')
 
         @self.event
-        async def message(sid, data):
+        async def message(sid: Tuple[str, int], data: str):
             logging.info(f'{sid} say\'s {data}')
 
     def event(self, func, name=None):
@@ -49,9 +49,11 @@ class Server:
         logging.info(f"Registering event {name!r}")
 
         @functools.wraps(func)
-        async def wrapper(sid, data_len):
+        async def wrapper(sid: Tuple[str, int], data_len: int):
+            buffer = await self.clients[sid].reader.read(data_len)
 
-            buffer = await self._read_bytes(self.clients[sid].reader, data_len)
+            if len(buffer) != data_len:
+                raise ConnectionAbortedError
 
             reserved_events = {
                 'connect': lambda: func(sid),
@@ -65,22 +67,20 @@ class Server:
         self.events[name] = wrapper
 
     @staticmethod
-    async def _read_bytes(reader, data_len):
-        buffer = bytearray(BUFFER_SIZE)
-
+    async def write_to_file(file: BufferedWriter, reader: asyncio.StreamReader, data_len: int):
         remaining = data_len
-        i = 0
 
         while remaining > 0:
             chunk = min(remaining, CHUNK)
 
-            buffer[i:i + chunk] = await reader.read(chunk)
+            data = await reader.read(chunk)
 
-            i += chunk
+            if len(data) != chunk:
+                raise ConnectionAbortedError
+
+            file.write(data)
 
             remaining -= chunk
-
-        return buffer[:data_len]
 
     async def on_connection_made(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         sio = Socket(reader, writer)
@@ -89,26 +89,35 @@ class Server:
 
         await self.events['connect'](sio.sid, 0)
 
-        while True:
+        try:
+            while True:
 
-            data = await reader.read(8)
+                data = await reader.read(8)
 
-            if not data:
-                asyncio.ensure_future(self.events['disconnect'](sio.sid, 0))
-                del self.clients[sio.sid]
-                break
+                if len(data) != 8:
+                    raise ConnectionAbortedError
 
-            # decrypt data
+                # decrypt data
 
-            data_len = int.from_bytes(data, 'big')
+                data_len = int.from_bytes(data, 'big')
 
-            data = await self._read_bytes(reader, data_len)
+                data = await reader.read(data_len)
 
-            # decrypt data
+                if len(data) != data_len:
+                    raise ConnectionAbortedError
 
-            data = json.loads(data)
+                # decrypt data
 
-            await self.events[data['event']](sio.sid, data['data_length'])
+                data = json.loads(data)
+
+                await self.events[data['event']](sio.sid, data['data_length'])
+
+        except ConnectionAbortedError:
+            asyncio.ensure_future(self.events['disconnect'](sio.sid, 0))
+        finally:
+            self.clients[sio.sid].writer.close()
+            await self.clients[sio.sid].writer.wait_closed()
+            del self.clients[sio.sid]
 
 
 async def start_server(name='Nitro', host='localhost', port=8888):
