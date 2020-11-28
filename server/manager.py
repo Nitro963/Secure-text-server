@@ -4,6 +4,10 @@ import functools
 import json
 from io import BufferedWriter
 from typing import Dict, Tuple, Callable, Coroutine
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad,unpad
+from Crypto import Random
+from Encryptor import Encryptor
 
 CHUNK = 1024
 
@@ -20,12 +24,13 @@ class Socket:
         await self.writer.drain()
 
 
-class Server:
+class Server(Encryptor):
     def __init__(self, name: str, address: Tuple[str, int]):
         self.name = name
         self.address = address
         self.clients: Dict[Tuple[str, int], Socket] = {}
         self.events: Dict[name, Callable[[Tuple[str, int], int], Coroutine]] = {}
+        self.iv = b''
 
         @self.event
         async def connect(sid: Tuple[str, int]):
@@ -41,7 +46,13 @@ class Server:
 
         @self.event
         async def message(sid: Tuple[str, int], data: str):
-            logging.info(f'{sid} say\'s {data}')
+            decryptedText = self.decrypt_message(data,self.iv)
+            logging.info(f'{sid} say\'s {decryptedText}')
+
+        @self.event
+        async def iv(sid: Tuple[str, int], data: str):
+            self.iv = data
+            logging.info(f'{sid} iv is {data}')
 
     def event(self, func, name=None):
         name = name if name is not None else func.__name__
@@ -59,7 +70,7 @@ class Server:
                 'connect': lambda: func(sid),
                 'disconnect': lambda: func(sid),
                 'pong': lambda: func(sid),
-                'message': lambda: func(sid, buffer.decode(encoding='utf-8')),
+                'message': lambda: func(sid, buffer),
             }
 
             await reserved_events.get(name, lambda: func(sid, buffer))()
@@ -91,7 +102,6 @@ class Server:
 
         try:
             while True:
-
                 data = await reader.read(8)
 
                 if len(data) != 8:
