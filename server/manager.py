@@ -8,6 +8,7 @@ import re
 from typing import Dict, Tuple, Callable, Coroutine, Optional
 from typing.io import IO
 from enum import Enum, auto
+from Crypto.PublicKey import RSA
 
 from Encryptor import Encryptor
 
@@ -97,7 +98,7 @@ class Server:
         sid = writer.get_extra_info('peername')
 
         self.clients[sid] = sio
-
+        # SENDING PUBLIC KEY TO CLIENT
         self.encryptors[sid] = Encryptor(self.key_pairs)
 
         data = self.encryptors[sid].public_key.export_key()
@@ -109,10 +110,22 @@ class Server:
         await writer.drain()
 
         data_len = int.from_bytes(await reader.read(8), 'big')
-
+        # RECIEVING ENCRYPTED SESSION KEY FROM CLIENT
         enc_session_key = await reader.read(data_len)
 
         self.encryptors[sid].decrypt_session_key(enc_session_key)
+
+        client_pub_key_len = int.from_bytes(await reader.read(8), 'big')
+
+        client_public_key = RSA.import_key(await reader.read(client_pub_key_len))
+        # ENCRYPTING CLIENT PUBLIC KEY AND SEND IT BACK
+        session_key = self.encryptors[sid].generate_session_key()
+
+        client_session_key = self.encryptors[sid].encrypt(client_public_key, session_key)
+        data_len = len(client_session_key).to_bytes(8, 'big')
+        writer.write(data_len)
+        writer.write(client_session_key)
+        await writer.drain()
 
         await self.events['connect'][0](sid, None)
 

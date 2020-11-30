@@ -1,11 +1,12 @@
 import asyncio
 import json
-
+from Encryptor import Encryptor
 
 class Client:
     def __init__(self, writer, reader):
         self.reader = reader
         self.writer = writer
+
 
     async def send_event(self, event: str, message: str):
         data = json.dumps({'event': event, 'data_length': len(message)}).encode()
@@ -38,7 +39,8 @@ class Client:
 async def start_client():
     reader, writer = await asyncio.open_connection('127.0.0.1', 8888)
     client = Client(writer, reader)
-    await client.send_event('message', 'Hello, World!'.encode('UTF-8'))
+    # await client.send_event('message', 'Hello, World!'.encode('UTF-8'))
+
     await client.close()
 
 

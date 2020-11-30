@@ -34,7 +34,10 @@ class Client:
         self.writer: Optional[asyncio.StreamWriter] = None
         self.events = {}
         self.server_public_key = None
+        self.client_session_key = None
         self.encryptor = Encryptor(key_pairs)
+        private, public = Encryptor.generate_key_pairs()
+        self.key_pairs = (private, public)
 
     async def write_to_file(self, file: IO, reader: asyncio.StreamReader, data_len: int, iv: bytes):
         remaining = data_len
@@ -57,20 +60,29 @@ class Client:
         reader, writer = await asyncio.open_connection(*self.address)
         self.reader = reader
         self.writer = writer
-
+        # ENCRYPTING SERVER PUBLIC KEY AND SEND SESSION KEY
         key_len = int.from_bytes(await reader.read(8), 'big')
 
         self.server_public_key = RSA.import_key(await reader.read(key_len))
 
-        session_key = self.encryptor.generate_session_key()
+        server_session_key = self.encryptor.generate_session_key()
 
-        enc_session_key = self.encryptor.encrypt(self.server_public_key, session_key)
+        enc_session_key = self.encryptor.encrypt(self.server_public_key, server_session_key)
 
         writer.write(len(enc_session_key).to_bytes(8, 'big'))
 
         writer.write(enc_session_key)
 
         await writer.drain()
+
+        # SENDING PUBLIC KEY TO  SERVER
+        public_key_len = len(self.key_pairs[1]).to_bytes(8,'big')
+        writer.write(public_key_len)
+        public_key = self.key_pairs[1]
+        writer.write(public_key)
+        await writer.drain()
+
+        self.client_session_key = await reader.read(key_len)
 
         if connection_event:
             connection_event.set()
