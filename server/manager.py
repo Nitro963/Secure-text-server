@@ -22,7 +22,7 @@ class DataMode(Enum):
 
 
 class Server:
-    def __init__(self, name: str, address: Tuple[str, int]):
+    def __init__(self, name: str, address: Tuple[str, int], key_pairs: Tuple[str, str]):
         self.name = name
         self.address = address
         self.clients: Dict[Tuple[str, int],
@@ -31,8 +31,10 @@ class Server:
                           Tuple[Callable[[Tuple[str, int], Optional[IO, bytes, str]],
                                          Coroutine],
                                 DataMode]] = {}
-        self.encryptor = Encryptor()
 
+        self.key_pairs = key_pairs
+
+        self.encryptors: Dict[Tuple[str, int], Encryptor] = {}
 
         @self.event()
         async def connect(sid: Tuple[str, int]):
@@ -96,120 +98,140 @@ class Server:
 
         self.clients[sid] = sio
 
-        # handshaking
+        self.encryptors[sid] = Encryptor(self.key_pairs)
+
+        data = self.encryptors[sid].public_key.export_key()
+
+        writer.write(len(data).to_bytes(8, 'big'))
+
+        writer.write(data)
+
+        await writer.drain()
+
+        data_len = int.from_bytes(await reader.read(8), 'big')
+
+        enc_session_key = await reader.read(data_len)
+
+        self.encryptors[sid].decrypt_session_key(enc_session_key)
 
         await self.events['connect'][0](sid, None)
 
         async def default_event(param):
             pass
 
-        try:
-            while True:
-
-                iv = await reader.read(16)
-
-                if len(iv) != 16:
-                    raise ConnectionError
-
-                encrypted_data = await reader.read(16)
-
-                if len(encrypted_data) != 16:
-                    raise ConnectionError
-
-                data = self.encryptor.decrypt_message(encrypted_data, iv)
-
-                data_len = int.from_bytes(data, 'big')
-
-                encrypted_data = await reader.read(data_len)
-
-                if len(encrypted_data) != data_len:
-                    raise ConnectionError
-
-                data = self.encryptor.decrypt_message(encrypted_data, iv)
-
-                data = json.loads(data)
-
-                data_len = data['data_length']
-
-                event_coroutine, data_mode = self.events.get(data['event'],
-                                                             (default_event,
-                                                              DataMode.FILE if data_len > BUFFER_LIMIT
-                                                              else DataMode.BYTES))
-                buffer = None
-
-                if data_mode == DataMode.BYTES:
-                    buffer = await reader.read(data_len)
-
-                    if len(buffer) != data_len:
-                        raise ConnectionError
-
-                    buffer = self.encryptor.decrypt_message(buffer, iv)
-
-                if data_mode == DataMode.FILE:
-                    tmp_file = tempfile.TemporaryFile()
-                    await self.write_to_file(tmp_file, reader, data_len, iv)
-                    buffer = tmp_file
-
-                asyncio.ensure_future(event_coroutine(sid, buffer))
-
-        except ConnectionError:
-            asyncio.ensure_future(self.events['disconnect'][0](sid, None))
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except ConnectionError:
-                pass
-            del self.clients[sid]
+        # try:
+        #     while True:
+        #
+        #         iv = await reader.read(16)
+        #
+        #         if len(iv) != 16:
+        #             raise ConnectionError
+        #
+        #         encrypted_data = await reader.read(16)
+        #
+        #         if len(encrypted_data) != 16:
+        #             raise ConnectionError
+        #
+        #         data = self.encryptor.decrypt_message(encrypted_data, iv)
+        #
+        #         data_len = int.from_bytes(data, 'big')
+        #
+        #         encrypted_data = await reader.read(data_len)
+        #
+        #         if len(encrypted_data) != data_len:
+        #             raise ConnectionError
+        #
+        #         data = self.encryptor.decrypt_message(encrypted_data, iv)
+        #
+        #         data = json.loads(data)
+        #
+        #         data_len = data['data_length']
+        #
+        #         event_coroutine, data_mode = self.events.get(data['event'],
+        #                                                      (default_event,
+        #                                                       DataMode.FILE if data_len > BUFFER_LIMIT
+        #                                                       else DataMode.BYTES))
+        #         buffer = None
+        #
+        #         if data_mode == DataMode.BYTES:
+        #             buffer = await reader.read(data_len)
+        #
+        #             if len(buffer) != data_len:
+        #                 raise ConnectionError
+        #
+        #             buffer = self.encryptor.decrypt_message(buffer, iv)
+        #
+        #         if data_mode == DataMode.FILE:
+        #             tmp_file = tempfile.TemporaryFile()
+        #             await self.write_to_file(tmp_file, reader, data_len, iv)
+        #             buffer = tmp_file
+        #
+        #         asyncio.ensure_future(event_coroutine(sid, buffer))
+        #
+        # except ConnectionError:
+        #     asyncio.ensure_future(self.events['disconnect'][0](sid, None))
+        # finally:
+        #     writer.close()
+        #     try:
+        #         await writer.wait_closed()
+        #     except ConnectionError:
+        #         pass
+        #     del self.clients[sid]
 
     async def send(self, to: Tuple[str, int], event: str, data: bytes):
-
-        _, writer = self.clients[to]
-
-        iv = Encryptor.generate_iv()
-
-        writer.write(iv)
-
-        encrypted_data = self.encryptor.encrypt_message(data, iv)
-
-        header = json.dumps({'event': event, 'data_length': len(encrypted_data)}).encode()
-
-        encrypted_header = self.encryptor.encrypt_message(header, iv)
-
-        encrypted_len = self.encryptor.encrypt_message(len(encrypted_header).to_bytes(8, 'big'), iv)
-
-        writer.write(encrypted_len)
-
-        writer.write(encrypted_header)
-
-        writer.write(encrypted_data)
-
-        await writer.drain()
+        pass
+        # _, writer = self.clients[to]
+        #
+        # iv = Encryptor.generate_iv()
+        #
+        # writer.write(iv)
+        #
+        # encrypted_data = self.encryptor.encrypt_message(data, iv)
+        #
+        # header = json.dumps({'event': event, 'data_length': len(encrypted_data)}).encode()
+        #
+        # encrypted_header = self.encryptor.encrypt_message(header, iv)
+        #
+        # encrypted_len = self.encryptor.encrypt_message(len(encrypted_header).to_bytes(8, 'big'), iv)
+        #
+        # writer.write(encrypted_len)
+        #
+        # writer.write(encrypted_header)
+        #
+        # writer.write(encrypted_data)
+        #
+        # await writer.drain()
 
 
 async def start_server(name='Nitro', host='localhost', port=8080):
     logging.basicConfig(level=logging.INFO)
 
-    server = Server(name, (host, port))
+    server = Server(name, (host, port), ('public.pem', 'private.pem'))
 
-    @server.event()
-    async def view(sid, data):
-        s = ''
-        with open(f'files/{data.decode()}') as f:
-            s = ''.join([s, f.readline()])
-        await server.send(sid, 'view', s.encode())
+    # public, private = Encryptor.generate_key_pairs()
+    # with open('public.pem', 'wb') as f:
+    #     f.write(public)
+    # with open('private.pem', 'wb') as f:
+    #     f.write(private)
 
-    @server.event()
-    async def edit(sid, data):
-        data = data.decode(encoding="utf-8")
-
-        match = re.search(r'.*\.txt', data)
-
-        with open(f'files/{match.group()}', 'w') as f:
-            f.write(data[match.end():])
-
-        await server.send(sid, 'edit', b'Editing done')
-
+    # @server.event()
+    # async def view(sid, data):
+    #     s = ''
+    #     with open(f'files/{data.decode()}') as f:
+    #         s = ''.join([s, f.readline()])
+    #     await server.send(sid, 'view', s.encode())
+    #
+    # @server.event()
+    # async def edit(sid, data):
+    #     data = data.decode(encoding="utf-8")
+    #
+    #     match = re.search(r'.*\.txt', data)
+    #
+    #     with open(f'files/{match.group()}', 'w') as f:
+    #         f.write(data[match.end():])
+    #
+    #     await server.send(sid, 'edit', b'Editing done')
+    #
     abstract_server = await asyncio.start_server(
         server.on_connection_made, server.address[0], server.address[1])
 
