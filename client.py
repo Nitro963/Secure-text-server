@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 from typing.io import IO
 
+from Crypto.PublicKey import RSA
+
 from Encryptor import Encryptor
 
 CHUNK = 1024
@@ -25,13 +27,17 @@ class DataMode(Enum):
 
 
 class Client:
-    def __init__(self, name: str, remote_host_address: Tuple[str, int]):
+    def __init__(self, name: str, remote_host_address: Tuple[str, int], key_pairs: Tuple[str, str]):
         self.name = name
         self.address = remote_host_address
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
         self.events = {}
-        self.encryptor = Encryptor()
+        self.server_public_key = None
+        self.client_session_key = None
+        self.encryptor = Encryptor(key_pairs)
+        private, public = Encryptor.generate_key_pairs()
+        self.key_pairs = (private, public)
 
     async def write_to_file(self, file: IO, reader: asyncio.StreamReader, data_len: int, iv: bytes):
         remaining = data_len
@@ -54,8 +60,29 @@ class Client:
         reader, writer = await asyncio.open_connection(*self.address)
         self.reader = reader
         self.writer = writer
+        # ENCRYPTING SERVER PUBLIC KEY AND SEND SESSION KEY
+        key_len = int.from_bytes(await reader.read(8), 'big')
 
-        # handshaking
+        self.server_public_key = RSA.import_key(await reader.read(key_len))
+
+        server_session_key = self.encryptor.generate_session_key()
+
+        enc_session_key = self.encryptor.encrypt(self.server_public_key, server_session_key)
+
+        writer.write(len(enc_session_key).to_bytes(8, 'big'))
+
+        writer.write(enc_session_key)
+
+        await writer.drain()
+
+        # SENDING PUBLIC KEY TO  SERVER
+        public_key_len = len(self.key_pairs[1]).to_bytes(8,'big')
+        writer.write(public_key_len)
+        public_key = self.key_pairs[1]
+        writer.write(public_key)
+        await writer.drain()
+
+        self.client_session_key = await reader.read(key_len)
 
         if connection_event:
             connection_event.set()
@@ -175,32 +202,32 @@ class Client:
         await self.writer.drain()
 
 
-client = Client('NitroClient', ('127.0.0.1', 8080))
-
-
-@client.event()
-async def message(data):
-    print(data)
-
-
 async def main():
+
+    # private, public = Encryptor.generate_key_pairs()
+    # with open('public_client.pem', 'wb') as f:
+    #     f.write(public)
+    # with open('private_client.pem', 'wb') as f:
+    #     f.write(private)
+
+    client = Client('NitroClient', ('127.0.0.1', 8080), ('public_client.pem', 'private_client.pem'))
 
     logging.basicConfig(level=logging.INFO)
 
-    view_event = asyncio.Event()
-
-    @client.event()
-    async def view(data):
-        print(data.decode(encoding='utf-8'))
-        view_event.set()
-
-    @client.event()
-    async def edit(data):
-        print(data.decode(encoding='utf-8'))
-
-    @client.event(data_mode=DataMode.FILE)
-    async def file_edit(file: IO):
-        pass
+    # view_event = asyncio.Event()
+    #
+    # @client.event()
+    # async def view(data):
+    #     print(data.decode(encoding='utf-8'))
+    #     view_event.set()
+    #
+    # @client.event()
+    # async def edit(data):
+    #     print(data.decode(encoding='utf-8'))
+    #
+    # @client.event(data_mode=DataMode.FILE)
+    # async def file_edit(file: IO):
+    #     pass
 
     with ThreadPoolExecutor(2) as pool:
         try:
@@ -210,29 +237,29 @@ async def main():
 
             await connection_event.wait()
 
-            while True:
-                result = await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter Your Command: ')
-
-                result = int(result)
-
-                if not result:
-                    break
-
-                if result == 1:
-                    view_event.clear()
-                    await client.send('view', b'New Text Document.txt')
-                    print("waiting for server response...")
-                    await view_event.wait()
-                    await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter Any Key..')
-
-                if result == 2:
-                    # file_name = await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter file name')
-
-                    file_name = 'New Text Document 1.txt'
-
-                    s = 'Hello, World!!'
-
-                    await client.send('edit', ''.join([file_name, s]).encode())
+            # while True:
+            #     result = await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter Your Command: ')
+            #
+            #     result = int(result)
+            #
+            #     if not result:
+            #         break
+            #
+            #     if result == 1:
+            #         view_event.clear()
+            #         await client.send('view', b'New Text Document.txt')
+            #         print("waiting for server response...")
+            #         await view_event.wait()
+            #         await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter Any Key..')
+            #
+            #     if result == 2:
+            #         # file_name = await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter file name')
+            #
+            #         file_name = 'New Text Document 1.txt'
+            #
+            #         s = 'Hello, World!!'
+            #
+            #         await client.send('edit', ''.join([file_name, s]).encode())
 
         except ConnectionError:
             pass
