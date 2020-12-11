@@ -14,6 +14,9 @@ from Encryptor import SymmetricEncryptor, AsymmetricEncryptor
 
 parser = argparse.ArgumentParser()
 
+parser.add_argument("name",
+                    type=str)
+
 parser.add_argument("host",
                     type=str)
 
@@ -229,13 +232,19 @@ class Server:
 async def start_server(name='Nitro', host='localhost', port=8080):
     logging.basicConfig(level=logging.INFO)
 
-    server = Server(name, (args.host, args.port))
+    server = Server(name, (host, port))
 
     @server.event()
     async def view(sid, data):
         s = ''
-        with open(f'files/{data.decode()}') as f:
-            s = ''.join([s, f.readline()])
+        try:
+            with open(f'files/{data.decode()}') as f:
+                s = ''.join([s, f.readline()])
+        except FileExistsError:
+            await server.send(sid, 'view', b'File not found')
+        except FileNotFoundError:
+            await server.send(sid, 'view', b'File not found')
+
         await server.send(sid, 'view', s.encode())
 
     @server.event(data_mode=DataMode.FILE)
@@ -243,15 +252,19 @@ async def start_server(name='Nitro', host='localhost', port=8080):
         file_name_len = int.from_bytes(file.read(8), 'big')
 
         file_name = file.read(file_name_len).decode()
+        try:
+            with open(f'files/{file_name}', 'wb') as f:
+                while True:
+                    data = file.read(CHUNK)
 
-        with open(f'files/{file_name}', 'wb') as f:
-            while True:
-                data = file.read(CHUNK)
+                    if not data:
+                        break
 
-                if not data:
-                    break
-
-                f.write(data)
+                    f.write(data)
+        except FileExistsError:
+            await server.send(sid, 'file_edit', b'File not found')
+        except FileNotFoundError:
+            await server.send(sid, 'file_edit', b'File not found')
 
         await server.send(sid, 'file_edit', b'Editing done')
 
@@ -264,4 +277,4 @@ async def start_server(name='Nitro', host='localhost', port=8080):
         await abstract_server.serve_forever()
 
 
-asyncio.run(start_server())
+asyncio.run(start_server(args.name, args.host, args.port))

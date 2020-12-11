@@ -19,6 +19,10 @@ from Encryptor import SymmetricEncryptor, AsymmetricEncryptor
 
 parser = argparse.ArgumentParser()
 
+parser.add_argument("name",
+                    type=str)
+
+
 parser.add_argument("remote_host",
                     type=str)
 
@@ -56,7 +60,7 @@ class Client:
         @self.event()
         async def disconnect():
             print('remote host disconnected')
-
+                    
     async def write_to_file(self, file: IO, reader: asyncio.StreamReader, data_len: int, iv: bytes):
         remaining = data_len
 
@@ -262,7 +266,7 @@ def edit_file(file_name: str):
 
 async def main():
 
-    client = Client('NitroClient', (args.remote_host, args.remote_port))
+    client = Client(args.name, (args.remote_host, args.remote_port))
 
     logging.basicConfig(level=logging.INFO)
 
@@ -273,7 +277,7 @@ async def main():
         print(data.decode(encoding='utf-8'))
         view_event.set()
 
-    @client.event(data_mode=DataMode.BYTES)
+    @client.event()
     async def file_edit(data: bytes):
         print(data.decode())
 
