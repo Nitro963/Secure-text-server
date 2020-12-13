@@ -9,6 +9,7 @@ from typing import Dict, Tuple, Callable, Coroutine, Optional
 from typing.io import IO
 from enum import Enum, auto
 from Crypto.PublicKey import RSA
+from hashlib import sha512
 
 from Encryptor import SymmetricEncryptor, AsymmetricEncryptor
 
@@ -97,7 +98,7 @@ class Server:
                             reader: asyncio.StreamReader, data_len: int, iv: bytes):
 
         remaining = data_len
-
+        file_hash = sha512()
         while remaining > 0:
             chunk = min(remaining, CHUNK)
 
@@ -110,7 +111,11 @@ class Server:
 
             file.write(data)
 
+            file_hash.update(data)
+
             remaining -= chunk
+
+        return file_hash.digest()
 
     async def on_connection_made(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         sio = (reader, writer)
@@ -178,7 +183,7 @@ class Server:
                                                               DataMode.FILE if data_len > BUFFER_LIMIT
                                                               else DataMode.BYTES))
                 buffer = None
-
+                hsh = 0
                 if data_mode == DataMode.BYTES:
                     buffer = await reader.read(data_len)
 
@@ -187,11 +192,31 @@ class Server:
 
                     buffer = self.encryptors[sid].decrypt(buffer, iv)
 
+                    hsh = sha512(buffer).digest()
+
                 if data_mode == DataMode.FILE:
                     tmp_file = tempfile.TemporaryFile()
-                    await self.write_to_file(sid, tmp_file, reader, data_len, iv)
+                    hsh = await self.write_to_file(sid, tmp_file, reader, data_len, iv)
                     tmp_file.seek(0)
                     buffer = tmp_file
+                hsh = int.from_bytes(hsh, 'big')
+
+                # receive and verify the signature
+                signature = await reader.read(2048)
+
+                signature = int.from_bytes(signature, 'big')
+
+
+                client_pub_key = self.clients_public_keys[sid]
+
+                hash_from_sign = pow(signature, client_pub_key.e, client_pub_key.n)
+
+                if hsh != hash_from_sign:
+                    # the file was modified from the last signed
+                    print("something wrong with the signature")
+                    pass
+                else:
+                    print("the signature is correct")
 
                 asyncio.ensure_future(event_coroutine(sid, buffer))
 
@@ -261,10 +286,13 @@ async def start_server(name='Nitro', host='localhost', port=8080):
                         break
 
                     f.write(data)
+
         except FileExistsError:
             await server.send(sid, 'file_edit', b'File not found')
+            return
         except FileNotFoundError:
             await server.send(sid, 'file_edit', b'File not found')
+            return
 
         await server.send(sid, 'file_edit', b'Editing done')
 

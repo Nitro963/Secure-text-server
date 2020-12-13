@@ -17,6 +17,8 @@ from Crypto.PublicKey import RSA
 
 from Encryptor import SymmetricEncryptor, AsymmetricEncryptor
 
+from hashlib import sha512
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument("name",
@@ -88,11 +90,10 @@ class Client:
         writer.write(public_key_len)
         writer.write(self.client_public_key.export_key())
 
-        # RECEIVING SERVER PUBLIC KEY AND SEND ENCRYPTED SESSION KEY
+        # RECEIVING SERVER PUBLIC KEY
         key_len = int.from_bytes(await reader.read(8), 'big')
-
         self.server_public_key = RSA.import_key(await reader.read(key_len))
-
+        # SEND ENCRYPTED SESSION KEY
         self.encryptor = SymmetricEncryptor(SymmetricEncryptor.generate_key())
 
         enc_session_key = AsymmetricEncryptor.encrypt(self.server_public_key, self.encryptor.session_key)
@@ -217,6 +218,15 @@ class Client:
 
         self.writer.write(encrypted_data)
 
+        # generate and send the signature
+        hsh = int.from_bytes(sha512(data).digest(), 'big')
+        signature = pow(hsh, self.client_private_key.d, self.client_private_key.n)
+
+        print(signature)
+
+        # here we must send the signature
+        self.writer.write(signature)
+
         await self.writer.drain()
 
     async def send_file(self, event: str, path: Path):
@@ -240,7 +250,7 @@ class Client:
         self.writer.write(encrypted_len)
 
         self.writer.write(encrypted_header)
-
+        file_hash = sha512()
         with open(path, 'rb') as f:
             while True:
                 data = f.read(1024)
@@ -248,7 +258,17 @@ class Client:
                 if not data:
                     break
 
+                file_hash.update(data)
+
                 self.writer.write(self.encryptor.encrypt(data, iv))
+
+        # generate and send the signature
+        hsh = int.from_bytes(file_hash.digest(), 'big')
+
+        signature = pow(hsh, self.client_private_key.d, self.client_private_key.n)
+
+        # here we must send the signature
+        self.writer.write(signature.to_bytes(2048, 'big'))
 
         await self.writer.drain()
 

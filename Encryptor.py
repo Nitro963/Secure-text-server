@@ -47,6 +47,7 @@ class AsymmetricEncryptor:
 
         return public_key, private_key
 
+        return
     @staticmethod
     def read_key_pairs(key_pairs: Tuple[str, str]):
 
