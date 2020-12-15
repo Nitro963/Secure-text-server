@@ -89,10 +89,10 @@ class Server:
         return inner_function
 
     def generate_csr(self):
-        csrfile = 'incommon.csr'
+        # csrfile = 'incommon.csr'
         req = crypto.X509Req()
         # Return an X509Name object representing the subject of the certificate.
-        req.get_subject().CN = 'CA'
+        req.get_subject().CN = self.name
         req.get_subject().countryName = 'SY'
         req.get_subject().stateOrProvinceName = 'Damascus'
         req.get_subject().localityName = 'Southern Syria'
@@ -101,15 +101,20 @@ class Server:
 
         # # Set the public key of the certificate to pkey.
         opensslPublicKey = crypto.load_publickey(crypto.FILETYPE_PEM,
-                                                 open(f'server_keys/Nitro_public.pem').read())
-        req.set_pubkey(opensslPublicKey)
+                                                 open(f'server_keys/{self.name}_public.pem').read())
+        opensslPrivateKey = crypto.load_privatekey(crypto.FILETYPE_PEM, open(f'server_keys/{self.name}_private.pem').read())
 
-        self.certData['CN']=self.name
-        self.certData['countryName'] = 'SY'
-        self.certData['stateOrProvinceName'] = 'Damascus'
-        self.certData['localityName'] = 'Southern Syria'
-        self.certData['organizationName'] = 'AI inc.'
-        self.certData['organizationalUnitName'] = 'Information Security'
+        req.set_pubkey(opensslPublicKey)
+        req.sign(opensslPrivateKey,"sha1")
+
+        self.csr = req
+
+        # self.certData['CN']=self.name
+        # self.certData['countryName'] = 'SY'
+        # self.certData['stateOrProvinceName'] = 'Damascus'
+        # self.certData['localityName'] = 'Southern Syria'
+        # self.certData['organizationName'] = 'AI inc.'
+        # self.certData['organizationalUnitName'] = 'Information Security'
 
     async def write_to_file(self, sid: Tuple[str, int], file: IO,
                             reader: asyncio.StreamReader, data_len: int, iv: bytes):
@@ -371,7 +376,7 @@ async def start_server(name='Nitro', host='localhost', port=8080):
 
     @client_ca.event()
     async def recv_cs(data):
-        cs_file = f'CS/{name}_cs.csr'
+        cs_file = f'CS/{server.name}_cs.cs'
 
         print(str(data.decode()))
 
@@ -381,10 +386,7 @@ async def start_server(name='Nitro', host='localhost', port=8080):
             f.write(crypto.dump_certificate(crypto.FILETYPE_PEM,server.cs))
         cs_event.set()
 
-    print("asdfas")
-    data = json.dumps(server.certData).encode()
-    print(type(data))
-    await client_ca.send('issue_cs', data)
+    await client_ca.send('issue_cs', crypto.dump_certificate_request(crypto.FILETYPE_PEM,server.csr))
     print("issue done")
     await cs_event.wait()
 
