@@ -3,28 +3,18 @@ import logging
 import functools
 import json
 import tempfile
-import argparse
+from pathlib import Path
 
 from typing import Dict, Tuple, Callable, Coroutine, Optional
 from typing.io import IO
 from enum import Enum, auto
 from Crypto.PublicKey import RSA
 from hashlib import sha512
-
+from OpenSSL import crypto
 from Encryptor import SymmetricEncryptor, AsymmetricEncryptor
+from client import Client
 
-parser = argparse.ArgumentParser()
-
-parser.add_argument("name",
-                    type=str)
-
-parser.add_argument("host",
-                    type=str)
-
-parser.add_argument("port",
-                    type=int)
-
-args = parser.parse_args()
+TYPE_RSA = crypto.TYPE_RSA
 
 CHUNK = 1024
 
@@ -55,10 +45,14 @@ class Server:
         self.encryptors: Dict[Tuple[str, int], SymmetricEncryptor] = {}
 
         self.clients_public_keys = {}
+        self.certData = {}
+        self.csr = crypto.X509Req()
+        self.cs = crypto.X509Req()
+        self.generate_csr()
 
         @self.event()
         async def connect(sid: Tuple[str, int]):
-            logging.info(f'{sid} jumped into {self.name} server.')
+            print(f'{sid} jumped into {self.name} server.')
 
         @self.event()
         async def disconnect(sid: Tuple[str, int]):
@@ -77,7 +71,7 @@ class Server:
         def inner_function(func):
             event_name = name if name is not None else func.__name__
 
-            logging.info(f"Registering event {event_name!r}")
+            print(f"Registering event {event_name!r}")
 
             @functools.wraps(func)
             async def wrapper(sid: Tuple[str, int], data):
@@ -94,9 +88,31 @@ class Server:
 
         return inner_function
 
+    def generate_csr(self):
+        csrfile = 'incommon.csr'
+        req = crypto.X509Req()
+        # Return an X509Name object representing the subject of the certificate.
+        req.get_subject().CN = 'CA'
+        req.get_subject().countryName = 'SY'
+        req.get_subject().stateOrProvinceName = 'Damascus'
+        req.get_subject().localityName = 'Southern Syria'
+        req.get_subject().organizationName = 'AI inc.'
+        req.get_subject().organizationalUnitName = 'Information Security'
+
+        # # Set the public key of the certificate to pkey.
+        opensslPublicKey = crypto.load_publickey(crypto.FILETYPE_PEM,
+                                                 open(f'server_keys/Nitro_public.pem').read())
+        req.set_pubkey(opensslPublicKey)
+
+        self.certData['CN']=self.name
+        self.certData['countryName'] = 'SY'
+        self.certData['stateOrProvinceName'] = 'Damascus'
+        self.certData['localityName'] = 'Southern Syria'
+        self.certData['organizationName'] = 'AI inc.'
+        self.certData['organizationalUnitName'] = 'Information Security'
+
     async def write_to_file(self, sid: Tuple[str, int], file: IO,
                             reader: asyncio.StreamReader, data_len: int, iv: bytes):
-
         remaining = data_len
         file_hash = sha512()
         while remaining > 0:
@@ -146,6 +162,12 @@ class Server:
         self.encryptors[sid] = SymmetricEncryptor(session_key)
 
         await self.events['connect'][0](sid, None)
+
+        if self.name != 'CA':
+            #sending CS
+            cs_file = f'CS/{self.name}_cs.cs'
+
+            await self.send_file(sid, 'recv_ca', Path(cs_file))
 
         async def default_event(param):
             pass
@@ -206,7 +228,6 @@ class Server:
 
                 signature = int.from_bytes(signature, 'big')
 
-
                 client_pub_key = self.clients_public_keys[sid]
 
                 hash_from_sign = pow(signature, client_pub_key.e, client_pub_key.n)
@@ -253,6 +274,48 @@ class Server:
 
         await writer.drain()
 
+    async def send_file(self, to: Tuple[str, int], event: str, path: Path):
+        _, writer = self.clients[to]
+
+        iv = SymmetricEncryptor.generate_iv()
+
+        writer.write(iv)
+
+        data_size = path.stat().st_size
+
+        padding_len = 16 - data_size % 16
+
+        header = json.dumps({'event': event, 'data_length': data_size + padding_len}).encode()
+
+        encrypted_header = self.encryptors[to].encrypt(header, iv)
+
+        encrypted_len = self.encryptors[to].encrypt(len(encrypted_header).to_bytes(8, 'big'), iv)
+
+        writer.write(encrypted_len)
+
+        writer.write(encrypted_header)
+        file_hash = sha512()
+        with open(path, 'rb') as f:
+            while True:
+                data = f.read(1024)
+
+                if not data:
+                    break
+
+                file_hash.update(data)
+
+                writer.write(self.encryptors[to].encrypt(data, iv))
+
+        # generate and send the signature
+        hsh = int.from_bytes(file_hash.digest(), 'big')
+
+        signature = pow(hsh, self.private_key.d, self.private_key.n)
+
+        # here we must send the signature
+        writer.write(signature.to_bytes(2048, 'big'))
+
+        await writer.drain()
+
 
 async def start_server(name='Nitro', host='localhost', port=8080):
     logging.basicConfig(level=logging.INFO)
@@ -296,6 +359,35 @@ async def start_server(name='Nitro', host='localhost', port=8080):
 
         await server.send(sid, 'file_edit', b'Editing done')
 
+    client_ca = Client(name, ('localhost', 6666))
+
+    cs_event = asyncio.Event()
+
+    asyncio.ensure_future(client_ca.create_connection(cs_event))
+
+    await cs_event.wait()
+
+    cs_event.clear()
+
+    @client_ca.event()
+    async def recv_cs(data):
+        cs_file = f'CS/{name}_cs.csr'
+
+        print(str(data.decode()))
+
+        server.cs = crypto.load_certificate(crypto.FILETYPE_PEM, str(data.decode()))
+
+        with open(cs_file, 'wb+') as f:
+            f.write(crypto.dump_certificate(crypto.FILETYPE_PEM,server.cs))
+        cs_event.set()
+
+    print("asdfas")
+    data = json.dumps(server.certData).encode()
+    print(type(data))
+    await client_ca.send('issue_cs', data)
+    print("issue done")
+    await cs_event.wait()
+
     abstract_server = await asyncio.start_server(
         server.on_connection_made, server.address[0], server.address[1])
 
@@ -303,6 +395,3 @@ async def start_server(name='Nitro', host='localhost', port=8080):
 
     async with abstract_server:
         await abstract_server.serve_forever()
-
-
-asyncio.run(start_server(args.name, args.host, args.port))

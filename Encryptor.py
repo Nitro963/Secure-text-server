@@ -37,6 +37,7 @@ class SymmetricEncryptor:
 
 
 class AsymmetricEncryptor:
+
     @staticmethod
     def generate_key_pairs():
         key = RSA.generate(2048)
@@ -47,10 +48,8 @@ class AsymmetricEncryptor:
 
         return public_key, private_key
 
-        return
     @staticmethod
     def read_key_pairs(key_pairs: Tuple[str, str]):
-
         if os.path.exists(key_pairs[0]) and os.path.exists(key_pairs[1]):
             public_key = RSA.import_key(open(key_pairs[0]).read())
 

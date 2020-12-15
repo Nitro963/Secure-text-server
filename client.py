@@ -3,10 +3,11 @@ import asyncio
 import functools
 import json
 import logging
+import sys
 import tempfile
 import os
 from enum import Enum, auto
-
+from OpenSSL import crypto
 from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
 
@@ -18,20 +19,6 @@ from Crypto.PublicKey import RSA
 from Encryptor import SymmetricEncryptor, AsymmetricEncryptor
 
 from hashlib import sha512
-
-parser = argparse.ArgumentParser()
-
-parser.add_argument("name",
-                    type=str)
-
-
-parser.add_argument("remote_host",
-                    type=str)
-
-parser.add_argument("remote_port",
-                    type=int)
-
-args = parser.parse_args()
 
 CHUNK = 1024
 
@@ -58,7 +45,7 @@ class Client:
         self.client_public_key, self.client_private_key = AsymmetricEncryptor.read_key_pairs(keys)
 
         self.encryptor = None
-
+        self.csr = crypto.X509Req()
         @self.event()
         async def disconnect():
             print('remote host disconnected')
@@ -79,6 +66,30 @@ class Client:
             file.write(data)
 
             remaining -= chunk
+
+    def generate_csr(self):
+        csrfile = 'clientCsr.csr'
+        req = crypto.X509Req()
+        # Return an X509Name object representing the subject of the certificate.
+        req.get_subject().CN = self.name
+        req.get_subject().countryName = 'SY'
+        req.get_subject().stateOrProvinceName = 'Damascus'
+        req.get_subject().localityName = 'Eastern Syria'
+        req.get_subject().organizationName = 'AI inc.'
+        req.get_subject().organizationalUnitName = 'Client Information Security'
+
+        # Set the public key of the certificate to pkey.
+        opensslPublicKey = crypto.load_publickey(crypto.FILETYPE_PEM,
+                                                 open(f'client_keys/{self.name}_public.pem').read())
+        req.set_pubkey(opensslPublicKey)
+        # Sign the certificate, using the key pkey and the message digest algorithm identified by the string digest.
+        # req.sign(opensslPrivateKey, "sha1")
+        # Dump the certificate request req into a buffer string encoded with the type type.
+
+        with open(f'CSR/{csrfile}', 'wb+') as f:
+            f.write(crypto.dump_certificate_request(crypto.FILETYPE_PEM, req))
+            f.close()
+        self.csr = req
 
     async def create_connection(self, connection_event: Optional[asyncio.Event] = None):
         reader, writer = await asyncio.open_connection(*self.address)
@@ -222,10 +233,8 @@ class Client:
         hsh = int.from_bytes(sha512(data).digest(), 'big')
         signature = pow(hsh, self.client_private_key.d, self.client_private_key.n)
 
-        print(signature)
-
         # here we must send the signature
-        self.writer.write(signature)
+        self.writer.write(signature.to_bytes(2048, 'big'))
 
         await self.writer.drain()
 
@@ -284,13 +293,36 @@ def edit_file(file_name: str):
             pass
 
 
-async def main():
-
+async def main(args):
+    csrfile = 'clientCsr.csr'
     client = Client(args.name, (args.remote_host, args.remote_port))
+
+    client_ca = Client(args.name, ('localhost', 6666))
+
+    await client_ca.create_connection()
+
+    await client_ca.send_file('issue_cs', Path(f'CSR/{csrfile}'))
+
+    cs_event = asyncio.Event()
+
+    @client_ca.event(data_mode=DataMode.FILE)
+    async def recv_cs(io):
+        cs_file = f'CS/{args.name}_cs.cs'
+        client.cs = crypto.load_certificate(crypto.FILETYPE_PEM, io)
+        with open(cs_file, 'wb+') as f:
+            f.write(crypto.dump_certificate_request(crypto.FILETYPE_PEM, cs_file))
+            f.close()
+        cs_event.set()
+
+    await cs_event.wait()
 
     logging.basicConfig(level=logging.INFO)
 
     view_event = asyncio.Event()
+
+    @client.event(data_mode=DataMode.FILE)
+    async def recv_cs(io):
+        client.server_cs = crypto.load_certificate(io)
 
     @client.event()
     async def view(data):
@@ -342,5 +374,3 @@ async def main():
             pass
         except Exception as e:
             logging.error(e, exc_info=e)
-
-asyncio.run(main())
