@@ -234,7 +234,8 @@ class Server:
                     print("something wrong with the signature")
                     pass
                 else:
-                    print("the signature is correct")
+                    # print("the signature is correct")
+                    pass
 
                 asyncio.ensure_future(event_coroutine(sid, buffer))
 
@@ -401,9 +402,7 @@ async def start_server(name='Nitro', host='localhost', port=8080):
     @server.event()
     async def recv_client_cs(sid, data):
         client_cs = crypto.load_certificate(crypto.FILETYPE_PEM, data)
-        print("client CS received")
         await client_ca.send('verify_cs', data)
-        print("done sending verify_cs")
         cs_event.set()
 
     cs_event.clear()
