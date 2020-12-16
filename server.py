@@ -2,6 +2,7 @@ import asyncio
 import logging
 import functools
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -89,9 +90,7 @@ class Server:
         return inner_function
 
     def generate_csr(self):
-        # csrfile = 'incommon.csr'
         req = crypto.X509Req()
-        # Return an X509Name object representing the subject of the certificate.
         req.get_subject().CN = self.name
         req.get_subject().countryName = 'SY'
         req.get_subject().stateOrProvinceName = 'Damascus'
@@ -99,22 +98,15 @@ class Server:
         req.get_subject().organizationName = 'AI inc.'
         req.get_subject().organizationalUnitName = 'Information Security'
 
-        # # Set the public key of the certificate to pkey.
         opensslPublicKey = crypto.load_publickey(crypto.FILETYPE_PEM,
                                                  open(f'server_keys/{self.name}_public.pem').read())
-        opensslPrivateKey = crypto.load_privatekey(crypto.FILETYPE_PEM, open(f'server_keys/{self.name}_private.pem').read())
+        opensslPrivateKey = crypto.load_privatekey(crypto.FILETYPE_PEM,
+                                                   open(f'server_keys/{self.name}_private.pem').read())
 
         req.set_pubkey(opensslPublicKey)
-        req.sign(opensslPrivateKey,"sha1")
+        req.sign(opensslPrivateKey, "sha1")
 
         self.csr = req
-
-        # self.certData['CN']=self.name
-        # self.certData['countryName'] = 'SY'
-        # self.certData['stateOrProvinceName'] = 'Damascus'
-        # self.certData['localityName'] = 'Southern Syria'
-        # self.certData['organizationName'] = 'AI inc.'
-        # self.certData['organizationalUnitName'] = 'Information Security'
 
     async def write_to_file(self, sid: Tuple[str, int], file: IO,
                             reader: asyncio.StreamReader, data_len: int, iv: bytes):
@@ -169,10 +161,9 @@ class Server:
         await self.events['connect'][0](sid, None)
 
         if self.name != 'CA':
-            #sending CS
             cs_file = f'CS/{self.name}_cs.cs'
 
-            await self.send_file(sid, 'recv_ca', Path(cs_file))
+            await self.send(sid, 'recv_server_cs', open(cs_file, 'rb').read())
 
         async def default_event(param):
             pass
@@ -226,6 +217,7 @@ class Server:
                     hsh = await self.write_to_file(sid, tmp_file, reader, data_len, iv)
                     tmp_file.seek(0)
                     buffer = tmp_file
+
                 hsh = int.from_bytes(hsh, 'big')
 
                 # receive and verify the signature
@@ -255,6 +247,8 @@ class Server:
             except ConnectionError:
                 pass
             del self.clients[sid]
+            del self.clients_public_keys[sid]
+            del self.encryptors[sid]
 
     async def send(self, to: Tuple[str, int], event: str, data: bytes):
         _, writer = self.clients[to]
@@ -277,9 +271,18 @@ class Server:
 
         writer.write(encrypted_data)
 
+        hsh = int.from_bytes(sha512(data).digest(), 'big')
+
+        signature = pow(hsh, self.private_key.d, self.private_key.n)
+
+        # here we must send the signature
+        writer.write(signature.to_bytes(2048, 'big'))
+
         await writer.drain()
 
     async def send_file(self, to: Tuple[str, int], event: str, path: Path):
+
+        print("sending file")
         _, writer = self.clients[to]
 
         iv = SymmetricEncryptor.generate_iv()
@@ -299,17 +302,21 @@ class Server:
         writer.write(encrypted_len)
 
         writer.write(encrypted_header)
+
         file_hash = sha512()
+
         with open(path, 'rb') as f:
             while True:
-                data = f.read(1024)
+                data = f.read(CHUNK)
 
                 if not data:
                     break
 
-                file_hash.update(data)
+                encrypted_data = self.encryptors[to].encrypt(data, iv)
 
-                writer.write(self.encryptors[to].encrypt(data, iv))
+                writer.write(encrypted_data)
+
+                file_hash.update(data)
 
         # generate and send the signature
         hsh = int.from_bytes(file_hash.digest(), 'big')
@@ -320,6 +327,11 @@ class Server:
         writer.write(signature.to_bytes(2048, 'big'))
 
         await writer.drain()
+
+    async def terminate_connection(self, sid):
+        reader, writer = self.clients[sid]
+        writer.close()
+        await writer.wait_closed()
 
 
 async def start_server(name='Nitro', host='localhost', port=8080):
@@ -378,17 +390,40 @@ async def start_server(name='Nitro', host='localhost', port=8080):
     async def recv_cs(data):
         cs_file = f'CS/{server.name}_cs.cs'
 
-        print(str(data.decode()))
-
-        server.cs = crypto.load_certificate(crypto.FILETYPE_PEM, str(data.decode()))
+        server.cs = crypto.load_certificate(crypto.FILETYPE_PEM, data)
 
         with open(cs_file, 'wb+') as f:
-            f.write(crypto.dump_certificate(crypto.FILETYPE_PEM,server.cs))
+            f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, server.cs))
         cs_event.set()
 
-    await client_ca.send('issue_cs', crypto.dump_certificate_request(crypto.FILETYPE_PEM,server.csr))
-    print("issue done")
+    cs_event.clear()
+
+    @server.event()
+    async def recv_client_cs(sid, data):
+        client_cs = crypto.load_certificate(crypto.FILETYPE_PEM, data)
+        print("client CS received")
+        await client_ca.send('verify_cs', data)
+        print("done sending verify_cs")
+        cs_event.set()
+
+    cs_event.clear()
+
+    @client_ca.event()
+    async def cs_verification(data):
+        bool_res = bool.from_bytes(data, 'big')
+        if bool_res:
+            print("the Client CS is valid")
+            pass
+        else:
+            print("terminate connection")
+            await client_ca.terminate()
+        cs_event.set()
+
+    await client_ca.send('issue_cs', crypto.dump_certificate_request(crypto.FILETYPE_PEM, server.csr))
+
     await cs_event.wait()
+
+    print("issue done")
 
     abstract_server = await asyncio.start_server(
         server.on_connection_made, server.address[0], server.address[1])

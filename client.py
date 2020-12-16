@@ -48,13 +48,14 @@ class Client:
         self.csr = crypto.X509Req()
         self.cs = crypto.X509()
         self.generate_csr()
+
         @self.event()
         async def disconnect():
             print('remote host disconnected')
                     
     async def write_to_file(self, file: IO, reader: asyncio.StreamReader, data_len: int, iv: bytes):
         remaining = data_len
-
+        file_hash = sha512()
         while remaining > 0:
             chunk = min(remaining, CHUNK)
 
@@ -67,7 +68,11 @@ class Client:
 
             file.write(data)
 
+            file_hash.update(data)
+
             remaining -= chunk
+
+        return file_hash.digest()
 
     def generate_csr(self):
         # csrfile = 'incommon.csr'
@@ -164,6 +169,7 @@ class Client:
                                                           DataMode.FILE if data_len > BUFFER_LIMIT else DataMode.BYTES))
 
             buffer = None
+            hsh = None
 
             if data_mode == DataMode.BYTES:
                 buffer = await self.reader.read(data_len)
@@ -173,10 +179,32 @@ class Client:
 
                 buffer = self.encryptor.decrypt(buffer, iv)
 
+                hsh = sha512(buffer).digest()
+
             if data_mode == DataMode.FILE:
                 tmp_file = tempfile.TemporaryFile()
-                await self.write_to_file(tmp_file, self.reader, data_len, iv)
+                hsh = await self.write_to_file(tmp_file, self.reader, data_len, iv)
                 buffer = tmp_file
+
+            hsh = int.from_bytes(hsh, 'big')
+
+            # receive and verify the signature
+            signature = await self.reader.read(2048)
+
+            signature = int.from_bytes(signature, 'big')
+
+            server_pub_key = self.server_public_key
+
+            hash_from_sign = pow(signature, server_pub_key.e, server_pub_key.n)
+
+
+            if hsh != hash_from_sign:
+                # the file was modified from the last signed
+                print("something wrong with the signature")
+                pass
+            else:
+                # print("the signature is correct")
+                pass
 
             asyncio.ensure_future(event_coroutine(buffer))
 
@@ -279,6 +307,13 @@ class Client:
 
         await self.writer.drain()
 
+    async def terminate(self):
+        self.writer.close()
+        self.server_public_key = None
+        await self.writer.wait_closed()
+        self.writer = None
+        self.reader = None
+
 
 def edit_file(file_name: str):
     with open(f'{file_name}', 'ab') as f:
@@ -292,37 +327,52 @@ def edit_file(file_name: str):
 
 
 async def main(args):
+    logging.basicConfig(level=logging.INFO)
+
     csrfile = 'clientCsr.csr'
     client = Client(args.name, (args.remote_host, args.remote_port))
 
     client_ca = Client(args.name, ('localhost', 6666))
     cs_event = asyncio.Event()
+
     asyncio.ensure_future(client_ca.create_connection(cs_event))
+
     await cs_event.wait()
+
     cs_event.clear()
 
+    # cs_verification_event = asyncio.Event()
+    #
+    # @client_ca.event()
+    # async def cs_verification(data):
+    #     bool_res = bool.from_bytes(data, 'big')
+    #     if bool_res:
+    #         # continue connection
+    #         logging.info("server cs verified.")
+    #     else:
+    #         # disconnect connection
+    #         logging.info("server cs is not known.")
+    #         await client.terminate()
+    #
+    #     cs_verification_event.set()
+
     @client_ca.event()
-    async def recv_cs(io):
+    async def recv_cs(data):
         cs_file = f'CS/{client.name}_cs.cs'
 
-        print(str(io.decode()))
+        client.cs = crypto.load_certificate(crypto.FILETYPE_PEM, data)
 
-        client.cs = crypto.load_certificate(crypto.FILETYPE_PEM, str(io.decode()))
+        with open(cs_file, 'wb+') as file:
+            file.write(crypto.dump_certificate(crypto.FILETYPE_PEM, client.cs))
 
-        with open(cs_file, 'wb+') as f:
-            f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, client.cs))
         cs_event.set()
 
+    # send csr to CA
     await client_ca.send('issue_cs', crypto.dump_certificate_request(crypto.FILETYPE_PEM, client.csr))
-    print("issue done")
-    await cs_event.wait()
-    logging.basicConfig(level=logging.INFO)
+
+    cs_event.clear()
 
     view_event = asyncio.Event()
-
-    @client.event(data_mode=DataMode.FILE)
-    async def recv_cs(io):
-        client.server_cs = crypto.load_certificate(io)
 
     @client.event()
     async def view(data):
@@ -333,6 +383,27 @@ async def main(args):
     async def file_edit(data: bytes):
         print(data.decode())
 
+    cs_event.clear()
+
+    @client.event()
+    async def recv_server_cs(io):
+        cs_data = io
+        client.server_cs = crypto.load_certificate(crypto.FILETYPE_PEM, cs_data)
+        await client_ca.send('verify_cs', io)
+        cs_event.set()
+
+    @client_ca.event()
+    async def cs_verification(data):
+        bool_res = bool.from_bytes(data, 'big')
+        if bool_res:
+            # the cs is valid
+            print("the Server CS is valid")
+            pass
+        else:
+            print("terminate connection")
+            await client.terminate()
+        cs_event.set()
+
     with ThreadPoolExecutor(2) as pool:
         try:
             connection_event = asyncio.Event()
@@ -340,6 +411,16 @@ async def main(args):
             asyncio.ensure_future(client.create_connection(connection_event))
 
             await connection_event.wait()
+
+            await cs_event.wait()
+
+            print("sending cs to server")
+            await client.send("recv_client_cs", crypto.dump_certificate(crypto.FILETYPE_PEM, client.cs))
+            print("done sending cs to server")
+            # await cs_verification_event.wait()
+
+            if client.reader is None:
+                return
 
             while True:
                 result = await asyncio.get_running_loop().run_in_executor(pool, input, 'Enter Your Command: ')
